@@ -3,5 +3,4 @@ solders==0.27.1
 httpx==0.28.1
 websockets==15.0.1
 python-dotenv==1.2.2
-jitosolana==0.1.0
 base58==2.1.1
