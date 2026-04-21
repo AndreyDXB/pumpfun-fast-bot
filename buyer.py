@@ -8,6 +8,10 @@ from solana.rpc.types import TxOpts
 
 PUMPPORTAL_API = "https://pumpportal.fun/api/trade-local"
 
+# Блокировки для предотвращения двойных сделок
+_buying = set()
+_selling = set()
+
 async def send_transaction(content: bytes, keypair: Keypair, rpc_url: str) -> str:
     tx = VersionedTransaction.from_bytes(content)
     signed_tx = VersionedTransaction(tx.message, [keypair])
@@ -27,6 +31,11 @@ async def buy(mint: str, data: dict, keypair: Keypair, rpc_url: str,
         return False
     if len(positions) >= 3:
         return False
+    if mint in _buying:
+        print(f"Уже покупается: {data.get('name')}")
+        return False
+
+    _buying.add(mint)
     try:
         payload = {
             "publicKey": str(keypair.pubkey()),
@@ -69,11 +78,20 @@ async def buy(mint: str, data: dict, keypair: Keypair, rpc_url: str,
     except Exception as e:
         print(f"Покупка ошибка: {e}")
         return False
+    finally:
+        _buying.discard(mint)
 
 async def sell(mint: str, reason: str, current_mcap_sol: float,
                keypair: Keypair, rpc_url: str, buy_amount: float,
                positions: dict, trade_history: list,
                save_fn, save_history_fn, tg_fn) -> bool:
+    if mint not in positions:
+        return False
+    if mint in _selling:
+        print(f"Уже продаётся: {positions.get(mint, {}).get('name')}")
+        return False
+
+    _selling.add(mint)
     try:
         payload = {
             "publicKey": str(keypair.pubkey()),
@@ -123,3 +141,5 @@ async def sell(mint: str, reason: str, current_mcap_sol: float,
     except Exception as e:
         print(f"Продажа ошибка: {e}")
         return False
+    finally:
+        _selling.discard(mint)
