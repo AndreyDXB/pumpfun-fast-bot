@@ -65,29 +65,17 @@ async def tg(text: str):
 
 async def buy_token(mint: str, data: dict):
     await buy(
-        mint=mint,
-        data=data,
-        keypair=keypair,
-        rpc_url=RPC_URL,
-        buy_amount=BUY_AMOUNT,
-        positions=positions,
-        save_fn=save_positions,
-        tg_fn=tg
+        mint=mint, data=data, keypair=keypair, rpc_url=RPC_URL,
+        buy_amount=BUY_AMOUNT, positions=positions,
+        save_fn=save_positions, tg_fn=tg
     )
 
 async def sell_token(mint: str, reason: str, current_mcap_sol: float):
     await sell(
-        mint=mint,
-        reason=reason,
-        current_mcap_sol=current_mcap_sol,
-        keypair=keypair,
-        rpc_url=RPC_URL,
-        buy_amount=BUY_AMOUNT,
-        positions=positions,
-        trade_history=trade_history,
-        save_fn=save_positions,
-        save_history_fn=save_history,
-        tg_fn=tg
+        mint=mint, reason=reason, current_mcap_sol=current_mcap_sol,
+        keypair=keypair, rpc_url=RPC_URL, buy_amount=BUY_AMOUNT,
+        positions=positions, trade_history=trade_history,
+        save_fn=save_positions, save_history_fn=save_history, tg_fn=tg
     )
 
 async def monitor_positions():
@@ -99,12 +87,14 @@ async def monitor_positions():
             continue
         try:
             async with websockets.connect(PUMP_WS, ping_interval=10, ping_timeout=5) as ws:
-                for mint in list(positions.keys()):
+                mints = list(positions.keys())
+                for mint in mints:
                     await ws.send(json.dumps({
                         "method": "subscribeTokenTrade",
                         "keys": [mint]
                     }))
                     print(f"Слежу за: {positions[mint]['name']}")
+
                 async for msg in ws:
                     try:
                         data = json.loads(msg)
@@ -122,11 +112,16 @@ async def monitor_positions():
                             await sell_token(mint, f"TP +{change*100:.0f}%", current_mcap_sol)
                         elif change <= -STOP_LOSS:
                             await sell_token(mint, f"SL {change*100:.0f}%", current_mcap_sol)
+
+                        # Если позиции изменились — переподключаемся
+                        if set(positions.keys()) != set(mints):
+                            print("Позиции изменились — переподключение")
+                            break
                     except Exception as e:
                         print(f"Ошибка трейда: {e}")
         except Exception as e:
             print(f"WS позиции ошибка: {e}")
-            await asyncio.sleep(3)
+            await asyncio.sleep(2)
 
 async def daily_report():
     while True:
