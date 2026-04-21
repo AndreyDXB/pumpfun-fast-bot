@@ -5,10 +5,10 @@ from solders.keypair import Keypair
 from solders.transaction import VersionedTransaction
 from solana.rpc.async_api import AsyncClient
 from solana.rpc.types import TxOpts
+from solders.pubkey import Pubkey
 
 PUMPPORTAL_API = "https://pumpportal.fun/api/trade-local"
 
-# Блокировки для предотвращения двойных сделок
 _buying = set()
 _selling = set()
 
@@ -24,6 +24,21 @@ async def send_transaction(content: bytes, keypair: Keypair, rpc_url: str) -> st
         return str(result.value)
     finally:
         await rpc.close()
+
+async def check_token_balance(mint: str, pubkey: str, rpc_url: str) -> float:
+    try:
+        rpc = AsyncClient(rpc_url)
+        result = await rpc.get_token_accounts_by_owner(
+            Pubkey.from_string(pubkey),
+            {"mint": Pubkey.from_string(mint)}
+        )
+        await rpc.close()
+        if result.value:
+            balance = result.value[0].account.data.parsed["info"]["tokenAmount"]["uiAmount"]
+            return float(balance or 0)
+        return 0
+    except:
+        return 0
 
 async def buy(mint: str, data: dict, keypair: Keypair, rpc_url: str,
               buy_amount: float, positions: dict, save_fn, tg_fn) -> bool:
@@ -54,6 +69,16 @@ async def buy(mint: str, data: dict, keypair: Keypair, rpc_url: str,
                 return False
 
         sig = await send_transaction(r.content, keypair, rpc_url)
+        print(f"TX отправлен: {sig[:20]}... Проверяем баланс...")
+
+        # Ждём и проверяем реальный баланс
+        await asyncio.sleep(5)
+        balance = await check_token_balance(mint, str(keypair.pubkey()), rpc_url)
+        
+        if balance <= 0:
+            print(f"Покупка failed — токены не получены: {data.get('name')}")
+            return False
+
         name = data.get("name", mint[:8])
         entry_mcap_sol = data.get("marketCapSol", 0)
         entry_mcap_usd = entry_mcap_sol * 86
@@ -70,6 +95,7 @@ async def buy(mint: str, data: dict, keypair: Keypair, rpc_url: str,
         msg = (f"КУПЛЕНО: {name}\n"
                f"MCap: ${entry_mcap_usd:.0f}\n"
                f"SOL: {buy_amount}\n"
+               f"Токенов: {balance:.0f}\n"
                f"TX: {sig[:20]}...")
         print(msg)
         await tg_fn(msg)
