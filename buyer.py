@@ -1,6 +1,5 @@
 import asyncio
 import httpx
-import json
 from datetime import datetime
 from solders.keypair import Keypair
 from solders.transaction import VersionedTransaction
@@ -57,7 +56,7 @@ async def buy(mint: str, data: dict, keypair: Keypair, rpc_url: str,
             "buy_tx": sig,
             "time": datetime.utcnow().isoformat(),
         }
-        save_fn(positions)
+        await save_fn(positions)
 
         msg = (f"КУПЛЕНО: {name}\n"
                f"MCap: ${entry_mcap_usd:.0f}\n"
@@ -73,7 +72,8 @@ async def buy(mint: str, data: dict, keypair: Keypair, rpc_url: str,
 
 async def sell(mint: str, reason: str, current_mcap_sol: float,
                keypair: Keypair, rpc_url: str, buy_amount: float,
-               positions: dict, trade_history: list, save_fn, save_history_fn, tg_fn) -> bool:
+               positions: dict, trade_history: list,
+               save_fn, save_history_fn, tg_fn) -> bool:
     try:
         payload = {
             "publicKey": str(keypair.pubkey()),
@@ -93,7 +93,7 @@ async def sell(mint: str, reason: str, current_mcap_sol: float,
 
         sig = await send_transaction(r.content, keypair, rpc_url)
         pos = positions.pop(mint, {})
-        save_fn(positions)
+        await save_fn(positions)
 
         name = pos.get("name", mint[:8])
         entry_mcap_sol = pos.get("entry_mcap_sol", 0)
@@ -117,7 +117,7 @@ async def sell(mint: str, reason: str, current_mcap_sol: float,
             "reason": reason,
             "time": datetime.utcnow().isoformat(),
         })
-        save_history_fn(trade_history)
+        await save_history_fn(trade_history)
         return True
 
     except Exception as e:
