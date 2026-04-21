@@ -2,6 +2,7 @@ import asyncio
 import httpx
 import os
 import json
+import redis.asyncio as aioredis
 from datetime import datetime
 from dotenv import load_dotenv
 from solders.keypair import Keypair
@@ -17,38 +18,39 @@ TAKE_PROFIT = float(os.getenv("TAKE_PROFIT", 0.50))
 STOP_LOSS = float(os.getenv("STOP_LOSS", 0.25))
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379")
 
 keypair = Keypair.from_base58_string(PRIVATE_KEY)
 
-POSITIONS_FILE = "positions.json"
-HISTORY_FILE = "history.json"
+redis_client = None
+positions = {}
+trade_history = []
 
-def load_json(path, default):
-    try:
-        with open(path, "r") as f:
-            return json.load(f)
-    except:
-        return default
+async def init_redis():
+    global redis_client, positions, trade_history
+    redis_client = aioredis.from_url(REDIS_URL, decode_responses=True)
+    
+    # Загружаем позиции
+    pos_data = await redis_client.get("positions")
+    if pos_data:
+        positions.update(json.loads(pos_data))
+        print(f"Загружено позиций из Redis: {len(positions)}")
+    else:
+        print("Позиций в Redis нет")
 
-def save_positions(data):
-    try:
-        with open(POSITIONS_FILE, "w") as f:
-            json.dump(data, f, indent=2)
-    except Exception as e:
-        print(f"Ошибка сохранения позиций: {e}")
+    # Загружаем историю
+    hist_data = await redis_client.get("trade_history")
+    if hist_data:
+        trade_history.extend(json.loads(hist_data))
+        print(f"Загружено сделок из Redis: {len(trade_history)}")
 
-def save_history(data):
-    try:
-        with open(HISTORY_FILE, "w") as f:
-            json.dump(data, f, indent=2)
-    except Exception as e:
-        print(f"Ошибка сохранения истории: {e}")
+async def save_positions(data):
+    if redis_client:
+        await redis_client.set("positions", json.dumps(data))
 
-positions = load_json(POSITIONS_FILE, {})
-trade_history = load_json(HISTORY_FILE, [])
-if isinstance(trade_history, dict):
-    trade_history = []
-print(f"Загружено позиций: {len(positions)}")
+async def save_history(data):
+    if redis_client:
+        await redis_client.set("trade_history", json.dumps(data))
 
 async def tg(text: str):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
@@ -113,7 +115,6 @@ async def monitor_positions():
                         elif change <= -STOP_LOSS:
                             await sell_token(mint, f"SL {change*100:.0f}%", current_mcap_sol)
 
-                        # Если позиции изменились — переподключаемся
                         if set(positions.keys()) != set(mints):
                             print("Позиции изменились — переподключение")
                             break
@@ -147,9 +148,10 @@ async def daily_report():
             msg += f"Худшая: {worst['name']} {worst['change']:+.1f}%"
         await tg(msg)
         trade_history.clear()
-        save_history(trade_history)
+        await save_history(trade_history)
 
 async def main():
+    await init_redis()
     print(f"Fast Bot! BUY={BUY_AMOUNT} SOL | TP={TAKE_PROFIT*100:.0f}% | SL={STOP_LOSS*100:.0f}%")
     print(f"RPC: {RPC_URL[:40]}...")
     await tg(f"Fast Pumpfun бот запущен!\nBUY={BUY_AMOUNT} SOL | TP={TAKE_PROFIT*100:.0f}% | SL={STOP_LOSS*100:.0f}%")
@@ -160,4 +162,4 @@ async def main():
     )
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    asyncio.run(main())     
