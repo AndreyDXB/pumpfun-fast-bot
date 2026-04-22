@@ -2,7 +2,7 @@ import asyncio
 import json
 import websockets
 from datetime import datetime, timezone
-from filters import check_anti_rug, is_good_token_basic
+from filters import is_good_token_basic
 
 watching = {}
 
@@ -10,38 +10,30 @@ WATCH_SECONDS = 60
 MIN_WALLETS = 10
 MIN_VOLUME_SOL = 0.5
 MAX_PRICE_DROP = 0.15
+MAX_SINGLE_HOLDER_PERCENT = 20.0  # один кошелёк не более 20% объёма
 
 PUMP_WS = "wss://pumpportal.fun/api/data"
 
 async def watch_token(mint: str, initial_data: dict, callback, positions: dict):
-    # Базовая проверка
     if not is_good_token_basic(initial_data, positions):
         return
 
     start_price = initial_data.get("marketCapSol", 0)
-    start_time = datetime.now(timezone.utc)
     name = initial_data.get("name", mint[:8])
+    creator = initial_data.get("traderPublicKey", "")
 
     watching[mint] = {
         "name": name,
         "start_price": start_price,
-        "start_time": start_time,
         "wallets": set(),
         "volume_sol": 0,
+        "wallet_volumes": {},  # объём каждого кошелька
         "current_price": start_price,
-        "creator": initial_data.get("traderPublicKey", ""),
+        "creator": creator,
         "creator_sold": False,
     }
 
     print(f"Наблюдаем: {name} | MCap: {start_price:.2f} SOL")
-
-    # Анти-rug проверка сразу
-    rug_ok, rug_reason = await check_anti_rug(mint)
-    if not rug_ok:
-        print(f"Анти-rug: {name} — {rug_reason}")
-        watching.pop(mint, None)
-        return
-    print(f"Анти-rug OK: {name} — {rug_reason}")
 
     try:
         async with websockets.connect(PUMP_WS, ping_interval=10, ping_timeout=5) as ws:
@@ -62,6 +54,7 @@ async def watch_token(mint: str, initial_data: dict, callback, positions: dict):
                 start = data["start_price"]
                 creator_sold = data["creator_sold"]
                 name = data["name"]
+                wallet_volumes = data["wallet_volumes"]
 
                 price_change = ((current - start) / start) if start > 0 else 0
 
@@ -84,6 +77,15 @@ async def watch_token(mint: str, initial_data: dict, callback, positions: dict):
                     watching.pop(mint, None)
                     return
 
+                # Проверка концентрации холдеров
+                if volume > 0:
+                    for wallet, vol in wallet_volumes.items():
+                        percent = (vol / volume) * 100
+                        if percent > MAX_SINGLE_HOLDER_PERCENT:
+                            print(f"Концентрация! {wallet[:8]}... держит {percent:.1f}% — пропускаем {name}")
+                            watching.pop(mint, None)
+                            return
+
                 print(f"ПОДХОДИТ: {name} | кошельков={wallets} | объём={volume:.3f} SOL")
                 watching.pop(mint, None)
                 await callback(mint, {**initial_data, "marketCapSol": current})
@@ -103,6 +105,7 @@ async def watch_token(mint: str, initial_data: dict, callback, positions: dict):
                     current_mcap = data.get("marketCapSol", 0) or 0
                     tx_type = data.get("txType", "")
 
+                    # Создатель продаёт — выходим
                     if trader == watching[mint]["creator"] and tx_type == "sell":
                         watching[mint]["creator_sold"] = True
                         print(f"Создатель продаёт! Пропускаем {watching[mint]['name']}")
@@ -112,6 +115,20 @@ async def watch_token(mint: str, initial_data: dict, callback, positions: dict):
                     if tx_type == "buy":
                         watching[mint]["wallets"].add(trader)
                         watching[mint]["volume_sol"] += sol_amount
+                        # Считаем объём каждого кошелька
+                        if trader not in watching[mint]["wallet_volumes"]:
+                            watching[mint]["wallet_volumes"][trader] = 0
+                        watching[mint]["wallet_volumes"][trader] += sol_amount
+
+                        # Мгновенная проверка — если кто-то купил >30% сразу
+                        total = watching[mint]["volume_sol"]
+                        if total > 0:
+                            trader_vol = watching[mint]["wallet_volumes"][trader]
+                            percent = (trader_vol / total) * 100
+                            if percent > 30 and total > 0.3:
+                                print(f"Кит! {trader[:8]}... купил {percent:.1f}% — пропускаем {watching[mint]['name']}")
+                                watching.pop(mint, None)
+                                break
 
                     if current_mcap > 0:
                         watching[mint]["current_price"] = current_mcap
