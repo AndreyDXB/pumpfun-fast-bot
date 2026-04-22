@@ -8,14 +8,12 @@ from dotenv import load_dotenv
 from solders.keypair import Keypair
 from monitor import monitor_new_tokens
 from buyer import buy, sell
+from telegram_bot import bot_state, poll_updates, send_message
 
 load_dotenv()
 
 PRIVATE_KEY = os.getenv("PRIVATE_KEY")
 RPC_URL = os.getenv("RPC_URL", "https://api.mainnet-beta.solana.com")
-BUY_AMOUNT = float(os.getenv("BUY_AMOUNT", 0.01))
-TAKE_PROFIT = float(os.getenv("TAKE_PROFIT", 0.50))
-STOP_LOSS = float(os.getenv("STOP_LOSS", 0.25))
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379")
@@ -29,16 +27,12 @@ trade_history = []
 async def init_redis():
     global redis_client, positions, trade_history
     redis_client = aioredis.from_url(REDIS_URL, decode_responses=True)
-    
-    # Загружаем позиции
     pos_data = await redis_client.get("positions")
     if pos_data:
         positions.update(json.loads(pos_data))
         print(f"Загружено позиций из Redis: {len(positions)}")
     else:
         print("Позиций в Redis нет")
-
-    # Загружаем историю
     hist_data = await redis_client.get("trade_history")
     if hist_data:
         trade_history.extend(json.loads(hist_data))
@@ -53,32 +47,50 @@ async def save_history(data):
         await redis_client.set("trade_history", json.dumps(data))
 
 async def tg(text: str):
-    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
-        return
-    try:
-        async with httpx.AsyncClient() as client:
-            await client.post(
-                f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-                json={"chat_id": TELEGRAM_CHAT_ID, "text": text},
-                timeout=5
-            )
-    except Exception as e:
-        print(f"Telegram ошибка: {e}")
+    await send_message(text)
 
 async def buy_token(mint: str, data: dict):
+    # Проверяем авто-стоп
+    if not bot_state["running"]:
+        print("Бот остановлен — пропускаем покупку")
+        return
+    if bot_state["daily_loss"] >= bot_state["max_daily_loss"]:
+        print(f"Достигнут лимит потерь {bot_state['max_daily_loss']} SOL — бот остановлен")
+        bot_state["running"] = False
+        await tg(f"🛑 Авто-стоп! Потери достигли {bot_state['max_daily_loss']} SOL за день")
+        return
+
     await buy(
-        mint=mint, data=data, keypair=keypair, rpc_url=RPC_URL,
-        buy_amount=BUY_AMOUNT, positions=positions,
-        save_fn=save_positions, tg_fn=tg
+        mint=mint,
+        data=data,
+        keypair=keypair,
+        rpc_url=RPC_URL,
+        buy_amount=bot_state["buy_amount"],
+        positions=positions,
+        save_fn=save_positions,
+        tg_fn=tg
     )
 
 async def sell_token(mint: str, reason: str, current_mcap_sol: float):
-    await sell(
-        mint=mint, reason=reason, current_mcap_sol=current_mcap_sol,
-        keypair=keypair, rpc_url=RPC_URL, buy_amount=BUY_AMOUNT,
-        positions=positions, trade_history=trade_history,
-        save_fn=save_positions, save_history_fn=save_history, tg_fn=tg
+    result = await sell(
+        mint=mint,
+        reason=reason,
+        current_mcap_sol=current_mcap_sol,
+        keypair=keypair,
+        rpc_url=RPC_URL,
+        buy_amount=bot_state["buy_amount"],
+        positions=positions,
+        trade_history=trade_history,
+        save_fn=save_positions,
+        save_history_fn=save_history,
+        tg_fn=tg
     )
+    # Обновляем дневные потери и PnL
+    if result and trade_history:
+        last = trade_history[-1]
+        bot_state["total_pnl"] += last["pnl_sol"]
+        if last["pnl_sol"] < 0:
+            bot_state["daily_loss"] += abs(last["pnl_sol"])
 
 async def monitor_positions():
     import websockets
@@ -110,9 +122,9 @@ async def monitor_positions():
                         change = (current_mcap_sol - entry_mcap_sol) / entry_mcap_sol
                         name = positions[mint]["name"]
                         print(f"{name}: {change*100:.1f}%")
-                        if change >= TAKE_PROFIT:
+                        if change >= bot_state["take_profit"]:
                             await sell_token(mint, f"TP +{change*100:.0f}%", current_mcap_sol)
-                        elif change <= -STOP_LOSS:
+                        elif change <= -bot_state["stop_loss"]:
                             await sell_token(mint, f"SL {change*100:.0f}%", current_mcap_sol)
 
                         if set(positions.keys()) != set(mints):
@@ -124,18 +136,21 @@ async def monitor_positions():
             print(f"WS позиции ошибка: {e}")
             await asyncio.sleep(2)
 
-async def daily_report():
+async def daily_reset():
     while True:
         await asyncio.sleep(86400)
+        bot_state["daily_loss"] = 0.0
+        bot_state["total_pnl"] = 0.0
+        bot_state["running"] = True
         if not trade_history:
-            await tg("Суточный отчёт: сделок не было")
+            await tg("📊 Суточный отчёт: сделок не было")
             continue
         total = len(trade_history)
         wins = [t for t in trade_history if t["change"] > 0]
         losses = [t for t in trade_history if t["change"] <= 0]
         total_pnl = sum(t["pnl_sol"] for t in trade_history)
         win_rate = len(wins) / total * 100
-        msg = (f"СУТОЧНЫЙ ОТЧЁТ\n"
+        msg = (f"📊 СУТОЧНЫЙ ОТЧЁТ\n"
                f"Сделок: {total}\n"
                f"Прибыльных: {len(wins)} | Убыточных: {len(losses)}\n"
                f"Winrate: {win_rate:.0f}%\n"
@@ -152,14 +167,22 @@ async def daily_report():
 
 async def main():
     await init_redis()
+    BUY_AMOUNT = float(os.getenv("BUY_AMOUNT", 0.01))
+    TAKE_PROFIT = float(os.getenv("TAKE_PROFIT", 0.50))
+    STOP_LOSS = float(os.getenv("STOP_LOSS", 0.25))
+    bot_state["buy_amount"] = BUY_AMOUNT
+    bot_state["take_profit"] = TAKE_PROFIT
+    bot_state["stop_loss"] = STOP_LOSS
+
     print(f"Fast Bot! BUY={BUY_AMOUNT} SOL | TP={TAKE_PROFIT*100:.0f}% | SL={STOP_LOSS*100:.0f}%")
     print(f"RPC: {RPC_URL[:40]}...")
-    await tg(f"Fast Pumpfun бот запущен!\nBUY={BUY_AMOUNT} SOL | TP={TAKE_PROFIT*100:.0f}% | SL={STOP_LOSS*100:.0f}%")
+    await tg(f"🚀 Pumpfun бот запущен!\nBUY={BUY_AMOUNT} SOL | TP={TAKE_PROFIT*100:.0f}% | SL={STOP_LOSS*100:.0f}%\n\nКоманды: /menu")
     await asyncio.gather(
         monitor_new_tokens(buy_token, positions),
         monitor_positions(),
-        daily_report()
+        daily_reset(),
+        poll_updates(positions, trade_history)
     )
 
 if __name__ == "__main__":
-    asyncio.run(main())     
+    asyncio.run(main())
