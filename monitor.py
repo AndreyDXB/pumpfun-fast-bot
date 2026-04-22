@@ -2,7 +2,7 @@ import asyncio
 import json
 import websockets
 import httpx
-from filters import is_good_token, sol_price_usd
+from watcher import watch_token
 import filters
 
 PUMP_WS = "wss://pumpportal.fun/api/data"
@@ -39,10 +39,24 @@ async def monitor_new_tokens(callback, positions: dict):
                         mint = data.get("mint")
                         if not mint:
                             continue
+
                         name = data.get("name", "Unknown")
-                        print(f"Новая: {name}")
-                        if is_good_token(data, positions):
-                            asyncio.ensure_future(callback(mint, data))
+                        initial_buy_sol = data.get("solAmount", 0) or 0
+
+                        # Базовая проверка перед наблюдением
+                        if initial_buy_sol < 0.5:
+                            print(f"Слабый старт: {initial_buy_sol:.3f} SOL | {name}")
+                            continue
+
+                        if len(positions) >= 3:
+                            print(f"Максимум позиций (3)")
+                            continue
+
+                        print(f"Новая: {name} | Старт: {initial_buy_sol:.2f} SOL — начинаем наблюдение")
+                        asyncio.ensure_future(
+                            watch_token(mint, data, callback, positions)
+                        )
+
                     except Exception as e:
                         print(f"Ошибка обработки: {e}")
         except Exception as e:
