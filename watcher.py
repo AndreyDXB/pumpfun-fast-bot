@@ -1,7 +1,6 @@
 import asyncio
 import json
 import websockets
-from datetime import datetime, timezone
 from filters import is_good_token_basic
 
 watching = {}
@@ -9,8 +8,9 @@ watching = {}
 WATCH_SECONDS = 60
 MIN_WALLETS = 5
 MIN_VOLUME_SOL = 0.3
-MAX_PRICE_DROP = 0.15
-MAX_SINGLE_HOLDER_PERCENT = 30.0
+MAX_PRICE_DROP = 0.20
+MAX_SINGLE_HOLDER_PERCENT = 40.0  # в конце наблюдения
+INSTANT_WHALE_PERCENT = 80.0      # мгновенная блокировка только явных китов
 
 PUMP_WS = "wss://pumpportal.fun/api/data"
 
@@ -52,7 +52,6 @@ async def watch_token(mint: str, initial_data: dict, callback, positions: dict):
                 volume = data["volume_sol"]
                 current = data["current_price"]
                 start = data["start_price"]
-                creator_sold = data["creator_sold"]
                 name = data["name"]
                 wallet_volumes = data["wallet_volumes"]
 
@@ -60,7 +59,7 @@ async def watch_token(mint: str, initial_data: dict, callback, positions: dict):
 
                 print(f"Итог {name}: кошельков={wallets} | объём={volume:.3f} SOL | цена={price_change*100:.1f}%")
 
-                if creator_sold:
+                if data["creator_sold"]:
                     print(f"Создатель продал — пропускаем {name}")
                     watching.pop(mint, None)
                     return
@@ -77,6 +76,7 @@ async def watch_token(mint: str, initial_data: dict, callback, positions: dict):
                     watching.pop(mint, None)
                     return
 
+                # Проверка концентрации в конце наблюдения
                 if volume > 0:
                     for wallet, vol in wallet_volumes.items():
                         percent = (vol / volume) * 100
@@ -85,7 +85,7 @@ async def watch_token(mint: str, initial_data: dict, callback, positions: dict):
                             watching.pop(mint, None)
                             return
 
-                print(f"ПОДХОДИТ: {name} | кошельков={wallets} | объём={volume:.3f} SOL")
+                print(f"ПОДХОДИТ: {name} | кошельков={wallets} | объём={volume:.3f} SOL | цена={price_change*100:.1f}%")
                 watching.pop(mint, None)
                 await callback(mint, {**initial_data, "marketCapSol": current})
 
@@ -117,12 +117,13 @@ async def watch_token(mint: str, initial_data: dict, callback, positions: dict):
                             watching[mint]["wallet_volumes"][trader] = 0
                         watching[mint]["wallet_volumes"][trader] += sol_amount
 
+                        # Мгновенно блокируем только явных китов >80%
                         total = watching[mint]["volume_sol"]
-                        if total > 0:
+                        if total > 0.5:
                             trader_vol = watching[mint]["wallet_volumes"][trader]
                             percent = (trader_vol / total) * 100
-                            if percent > 50 and total > 0.3:
-                                print(f"Кит! {trader[:8]}... купил {percent:.1f}% — пропускаем {watching[mint]['name']}")
+                            if percent > INSTANT_WHALE_PERCENT:
+                                print(f"Явный кит! {trader[:8]}... купил {percent:.1f}% — пропускаем {watching[mint]['name']}")
                                 watching.pop(mint, None)
                                 break
 
