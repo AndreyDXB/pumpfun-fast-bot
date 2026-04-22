@@ -94,7 +94,6 @@ async def monitor_positions():
                     }))
                     print(f"Слежу за: {positions[mint]['name']}")
 
-                # Переподключаемся каждые 30 секунд чтобы не пропустить новые позиции
                 deadline = asyncio.get_event_loop().time() + 30
 
                 async for msg in ws:
@@ -115,7 +114,6 @@ async def monitor_positions():
                         elif change <= -bot_state["stop_loss"]:
                             await sell_token(mint, f"SL {change*100:.0f}%", current_mcap_sol)
 
-                        # Переподключаемся если позиции изменились или истек дедлайн
                         if set(positions.keys()) != set(mints):
                             print("Позиции изменились — переподключение")
                             break
@@ -131,15 +129,16 @@ async def monitor_positions():
             await asyncio.sleep(2)
 
 async def check_positions_timeout():
-    """Принудительно продаём позиции которые висят более 2 часов"""
+    """Принудительно продаём позиции которые висят дольше TIMEOUT_MINUTES"""
     while True:
         await asyncio.sleep(60)
+        timeout_minutes = float(os.getenv("TIMEOUT_MINUTES", 120))
         for mint in list(positions.keys()):
             try:
                 pos = positions[mint]
                 buy_time = datetime.fromisoformat(pos.get("time", datetime.utcnow().isoformat()))
                 age_minutes = (datetime.utcnow() - buy_time).total_seconds() / 60
-                if age_minutes > 120:
+                if age_minutes > timeout_minutes:
                     print(f"Таймаут позиции: {pos['name']} ({age_minutes:.0f} мин) — продаём")
                     await sell_token(mint, f"Таймаут {age_minutes:.0f} мин", pos["entry_mcap_sol"])
             except Exception as e:
@@ -179,13 +178,14 @@ async def main():
     BUY_AMOUNT = float(os.getenv("BUY_AMOUNT", 0.01))
     TAKE_PROFIT = float(os.getenv("TAKE_PROFIT", 0.50))
     STOP_LOSS = float(os.getenv("STOP_LOSS", 0.25))
+    TIMEOUT_MINUTES = float(os.getenv("TIMEOUT_MINUTES", 120))
     bot_state["buy_amount"] = BUY_AMOUNT
     bot_state["take_profit"] = TAKE_PROFIT
     bot_state["stop_loss"] = STOP_LOSS
 
-    print(f"Fast Bot! BUY={BUY_AMOUNT} SOL | TP={TAKE_PROFIT*100:.0f}% | SL={STOP_LOSS*100:.0f}%")
+    print(f"Fast Bot! BUY={BUY_AMOUNT} SOL | TP={TAKE_PROFIT*100:.0f}% | SL={STOP_LOSS*100:.0f}% | Timeout={TIMEOUT_MINUTES:.0f}min")
     print(f"RPC: {RPC_URL[:40]}...")
-    await tg(f"Pumpfun бот запущен!\nBUY={BUY_AMOUNT} SOL | TP={TAKE_PROFIT*100:.0f}% | SL={STOP_LOSS*100:.0f}%\n\nКоманды: /menu")
+    await tg(f"Pumpfun бот запущен!\nBUY={BUY_AMOUNT} SOL | TP={TAKE_PROFIT*100:.0f}% | SL={STOP_LOSS*100:.0f}% | Timeout={TIMEOUT_MINUTES:.0f}min\n\nКоманды: /menu")
     await asyncio.gather(
         monitor_new_tokens(buy_token, positions),
         monitor_copy_trading(buy_token, positions),
