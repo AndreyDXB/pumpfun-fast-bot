@@ -5,7 +5,6 @@ import os
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-# Состояние бота
 bot_state = {
     "running": True,
     "take_profit": 0.50,
@@ -51,13 +50,14 @@ async def send_keyboard(text: str, buttons: list):
 async def process_command(text: str, positions: dict, trade_history: list):
     text = text.strip().lower()
 
-    if text == "/start" or text == "/menu":
+    if text == "/start" or text == "/menu" or text == "menu":
         await send_keyboard(
             "🤖 <b>Pumpfun Bot</b>\nВыбери действие:",
             [
                 [{"text": "📊 Статус", "data": "status"}, {"text": "⏸ Стоп", "data": "stop"}],
                 [{"text": "▶️ Старт", "data": "start"}, {"text": "💰 Позиции", "data": "positions"}],
                 [{"text": "📈 История", "data": "history"}, {"text": "⚙️ Настройки", "data": "settings"}],
+                [{"text": "👛 Кошельки", "data": "wallets"}, {"text": "❓ Помощь", "data": "help"}],
             ]
         )
 
@@ -150,7 +150,35 @@ async def process_command(text: str, positions: dict, trade_history: list):
         )
         await send_message(msg)
 
-    elif text == "/help":
+    elif text.startswith("/addwallet "):
+        try:
+            from copy_trading import add_wallet
+            wallet = text.split()[1]
+            add_wallet(wallet)
+            await send_message(f"✅ Кошелёк добавлен: {wallet[:8]}...")
+        except:
+            await send_message("❌ Формат: /addwallet <адрес>")
+
+    elif text.startswith("/removewallet "):
+        try:
+            from copy_trading import remove_wallet
+            wallet = text.split()[1]
+            remove_wallet(wallet)
+            await send_message(f"✅ Кошелёк удалён: {wallet[:8]}...")
+        except:
+            await send_message("❌ Формат: /removewallet <адрес>")
+
+    elif text == "/wallets" or text == "wallets":
+        from copy_trading import TOP_WALLETS
+        if not TOP_WALLETS:
+            await send_message("📭 Нет кошельков для copy trading")
+        else:
+            msg = "👛 <b>Кошельки для copy trading:</b>\n"
+            for w in list(TOP_WALLETS)[:10]:
+                msg += f"• {w[:8]}...\n"
+            await send_message(msg)
+
+    elif text == "/help" or text == "help":
         msg = (
             "📋 <b>Команды:</b>\n"
             "/menu — главное меню\n"
@@ -159,10 +187,13 @@ async def process_command(text: str, positions: dict, trade_history: list):
             "/start_bot — запустить покупки\n"
             "/positions — открытые позиции\n"
             "/history — история сделок\n"
-            "/tp 50 — установить Take Profit %\n"
-            "/sl 25 — установить Stop Loss %\n"
+            "/tp 50 — Take Profit %\n"
+            "/sl 25 — Stop Loss %\n"
             "/amount 0.01 — размер сделки SOL\n"
-            "/maxloss 0.05 — макс. потеря в день SOL"
+            "/maxloss 0.05 — макс. потеря в день\n"
+            "/addwallet <адрес> — добавить кошелёк copy trading\n"
+            "/removewallet <адрес> — удалить кошелёк\n"
+            "/wallets — список кошельков"
         )
         await send_message(msg)
 
@@ -180,21 +211,18 @@ async def poll_updates(positions: dict, trade_history: list):
                 data = r.json()
                 for update in data.get("result", []):
                     offset = update["update_id"] + 1
-                    
-                    # Обычное сообщение
+
                     if "message" in update:
                         text = update["message"].get("text", "")
                         chat_id = str(update["message"]["chat"]["id"])
                         if chat_id == str(TELEGRAM_CHAT_ID):
                             await process_command(text, positions, trade_history)
-                    
-                    # Нажатие кнопки
+
                     elif "callback_query" in update:
                         data_cb = update["callback_query"]["data"]
                         chat_id = str(update["callback_query"]["message"]["chat"]["id"])
                         if chat_id == str(TELEGRAM_CHAT_ID):
                             await process_command(data_cb, positions, trade_history)
-                            # Подтверждаем нажатие кнопки
                             await client.post(
                                 f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/answerCallbackQuery",
                                 json={"callback_query_id": update["callback_query"]["id"]},
