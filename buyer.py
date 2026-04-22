@@ -6,24 +6,41 @@ from solders.transaction import VersionedTransaction
 from solana.rpc.async_api import AsyncClient
 from solana.rpc.types import TxOpts
 from solders.pubkey import Pubkey
+import base58
 
 PUMPPORTAL_API = "https://pumpportal.fun/api/trade-local"
+JITO_ENDPOINT = "https://mainnet.block-engine.jito.labs.io/api/v1/bundles"
 
 _buying = set()
 _selling = set()
 
-async def send_transaction(content: bytes, keypair: Keypair, rpc_url: str) -> str:
-    tx = VersionedTransaction.from_bytes(content)
-    signed_tx = VersionedTransaction(tx.message, [keypair])
-    rpc = AsyncClient(rpc_url)
-    try:
-        result = await rpc.send_raw_transaction(
-            bytes(signed_tx),
-            opts=TxOpts(skip_preflight=True, preflight_commitment="processed")
+async def send_jito_bundle(transactions: list, keypairs: list, rpc_url: str) -> str:
+    signed_txs = []
+    for i, (tx_bytes, keypair) in enumerate(zip(transactions, keypairs)):
+        tx = VersionedTransaction.from_bytes(tx_bytes)
+        signed_tx = VersionedTransaction(tx.message, [keypair])
+        signed_txs.append(signed_tx)
+
+    encoded = [
+        base58.b58encode(bytes(tx)).decode("utf-8")
+        for tx in signed_txs
+    ]
+
+    async with httpx.AsyncClient() as client:
+        r = await client.post(
+            JITO_ENDPOINT,
+            json={
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "sendBundle",
+                "params": [encoded]
+            },
+            timeout=15
         )
-        return str(result.value)
-    finally:
-        await rpc.close()
+        result = r.json()
+        if "error" in result:
+            raise Exception(f"Jito ошибка: {result['error']}")
+        return result.get("result", "unknown")
 
 async def check_token_balance(mint: str, pubkey: str, rpc_url: str) -> float:
     try:
@@ -52,29 +69,57 @@ async def buy(mint: str, data: dict, keypair: Keypair, rpc_url: str,
 
     _buying.add(mint)
     try:
-        payload = {
-            "publicKey": str(keypair.pubkey()),
-            "action": "buy",
-            "mint": mint,
-            "amount": buy_amount,
-            "denominatedInSol": "true",
-            "slippage": 50,
-            "priorityFee": 0.005,
-            "pool": "pump"
-        }
+        # Jito bundle — массив из одной транзакции
+        payload = [
+            {
+                "publicKey": str(keypair.pubkey()),
+                "action": "buy",
+                "mint": mint,
+                "amount": buy_amount,
+                "denominatedInSol": "true",
+                "slippage": 50,
+                "priorityFee": 0.001,  # Jito tip
+                "pool": "pump"
+            }
+        ]
+
         async with httpx.AsyncClient() as client:
-            r = await client.post(PUMPPORTAL_API, json=payload, timeout=10)
+            r = await client.post(
+                PUMPPORTAL_API,
+                json=payload,
+                timeout=10
+            )
             if r.status_code != 200:
                 print(f"API ошибка: {r.status_code} | {r.text}")
                 return False
 
-        sig = await send_transaction(r.content, keypair, rpc_url)
-        print(f"TX отправлен: {sig[:20]}... Проверяем баланс...")
-
-        # Ждём и проверяем реальный баланс
-        await asyncio.sleep(5)
-        balance = await check_token_balance(mint, str(keypair.pubkey()), rpc_url)
+        # Получаем список транзакций
+        tx_list = r.json() if r.headers.get("content-type", "").startswith("application/json") else [r.content]
         
+        # Если ответ бинарный — обычная транзакция
+        if isinstance(tx_list, bytes) or not isinstance(tx_list, list):
+            tx_bytes = r.content
+            tx = VersionedTransaction.from_bytes(tx_bytes)
+            signed_tx = VersionedTransaction(tx.message, [keypair])
+            rpc = AsyncClient(rpc_url)
+            result = await rpc.send_raw_transaction(
+                bytes(signed_tx),
+                opts=TxOpts(skip_preflight=True, preflight_commitment="processed")
+            )
+            await rpc.close()
+            sig = str(result.value)
+        else:
+            # Jito bundle
+            sig = await send_jito_bundle(
+                [bytes.fromhex(tx) if isinstance(tx, str) else tx for tx in tx_list],
+                [keypair] * len(tx_list),
+                rpc_url
+            )
+
+        print(f"TX: {str(sig)[:20]}... Проверяем баланс...")
+        await asyncio.sleep(8)
+        
+        balance = await check_token_balance(mint, str(keypair.pubkey()), rpc_url)
         if balance <= 0:
             print(f"Покупка failed — токены не получены: {data.get('name')}")
             return False
@@ -87,7 +132,7 @@ async def buy(mint: str, data: dict, keypair: Keypair, rpc_url: str,
             "entry_mcap_sol": entry_mcap_sol,
             "entry_mcap_usd": entry_mcap_usd,
             "name": name,
-            "buy_tx": sig,
+            "buy_tx": str(sig)[:20],
             "time": datetime.utcnow().isoformat(),
         }
         await save_fn(positions)
@@ -96,7 +141,7 @@ async def buy(mint: str, data: dict, keypair: Keypair, rpc_url: str,
                f"MCap: ${entry_mcap_usd:.0f}\n"
                f"SOL: {buy_amount}\n"
                f"Токенов: {balance:.0f}\n"
-               f"TX: {sig[:20]}...")
+               f"TX: {str(sig)[:20]}...")
         print(msg)
         await tg_fn(msg)
         return True
@@ -119,23 +164,49 @@ async def sell(mint: str, reason: str, current_mcap_sol: float,
 
     _selling.add(mint)
     try:
-        payload = {
-            "publicKey": str(keypair.pubkey()),
-            "action": "sell",
-            "mint": mint,
-            "amount": "100%",
-            "denominatedInSol": "false",
-            "slippage": 50,
-            "priorityFee": 0.005,
-            "pool": "pump"
-        }
+        payload = [
+            {
+                "publicKey": str(keypair.pubkey()),
+                "action": "sell",
+                "mint": mint,
+                "amount": "100%",
+                "denominatedInSol": "false",
+                "slippage": 50,
+                "priorityFee": 0.001,
+                "pool": "pump"
+            }
+        ]
+
         async with httpx.AsyncClient() as client:
-            r = await client.post(PUMPPORTAL_API, json=payload, timeout=10)
+            r = await client.post(
+                PUMPPORTAL_API,
+                json=payload,
+                timeout=10
+            )
             if r.status_code != 200:
                 print(f"API ошибка продажи: {r.status_code}")
                 return False
 
-        sig = await send_transaction(r.content, keypair, rpc_url)
+        tx_list = r.json() if r.headers.get("content-type", "").startswith("application/json") else [r.content]
+
+        if isinstance(tx_list, bytes) or not isinstance(tx_list, list):
+            tx_bytes = r.content
+            tx = VersionedTransaction.from_bytes(tx_bytes)
+            signed_tx = VersionedTransaction(tx.message, [keypair])
+            rpc = AsyncClient(rpc_url)
+            result = await rpc.send_raw_transaction(
+                bytes(signed_tx),
+                opts=TxOpts(skip_preflight=True, preflight_commitment="processed")
+            )
+            await rpc.close()
+            sig = str(result.value)
+        else:
+            sig = await send_jito_bundle(
+                [bytes.fromhex(tx) if isinstance(tx, str) else tx for tx in tx_list],
+                [keypair] * len(tx_list),
+                rpc_url
+            )
+
         pos = positions.pop(mint, {})
         await save_fn(positions)
 
@@ -150,7 +221,7 @@ async def sell(mint: str, reason: str, current_mcap_sol: float,
         msg = (f"ПРОДАНО ({reason}): {name}\n"
                f"Вход: ${entry_mcap_usd:.0f} -> Выход: ${exit_mcap_usd:.0f}\n"
                f"Результат: {emoji} {change:+.1f}% ({pnl_sol:+.4f} SOL)\n"
-               f"TX: {sig[:20]}...")
+               f"TX: {str(sig)[:20]}...")
         print(msg)
         await tg_fn(msg)
 
