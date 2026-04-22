@@ -1,23 +1,62 @@
-# Фильтры для отбора монет
+import httpx
 
-MIN_INITIAL_BUY_SOL = 1.0    # минимальная начальная покупка создателя
-MAX_INITIAL_BUY_SOL = 20.0   # максимальная (слишком большая = подозрительно)
-MIN_MCAP_USD = 1000           # минимальный MCap в USD
-MAX_MCAP_USD = 15000          # максимальный MCap в USD
+MIN_INITIAL_BUY_SOL = 0.5
+MAX_INITIAL_BUY_SOL = 20.0
+MIN_MCAP_USD = 1000
+MAX_MCAP_USD = 15000
+MAX_CREATOR_PERCENT = 20.0  # создатель не более 20% токенов
+TOTAL_SUPPLY = 1_000_000_000
 
 sol_price_usd = 86.0
 
-def is_good_token(data: dict, positions: dict) -> bool:
+async def check_anti_rug(mint: str) -> tuple[bool, str]:
+    try:
+        async with httpx.AsyncClient() as client:
+            # Проверяем данные токена черезRugCheck API
+            r = await client.get(
+                f"https://api.rugcheck.xyz/v1/tokens/{mint}/report/summary",
+                timeout=5
+            )
+            if r.status_code != 200:
+                return True, "API недоступен — пропускаем проверку"
+            
+            data = r.json()
+            
+            # Проверка рисков
+            risks = data.get("risks", [])
+            for risk in risks:
+                risk_name = risk.get("name", "")
+                level = risk.get("level", "")
+                
+                if level == "danger":
+                    return False, f"Danger risk: {risk_name}"
+                
+                # Критические риски
+                if "freeze" in risk_name.lower():
+                    return False, "Токен можно заморозить"
+                if "mint" in risk_name.lower() and level in ["warn", "danger"]:
+                    return False, "Mint authority не отозван"
+                if "top holders" in risk_name.lower() and level == "danger":
+                    return False, "Концентрация у топ холдеров"
+
+            score = data.get("score", 0)
+            if score < 500:
+                return False, f"Низкий rug score: {score}"
+
+            return True, f"OK (score: {score})"
+
+    except Exception as e:
+        return True, f"Ошибка проверки: {e}"
+
+def is_good_token_basic(data: dict, positions: dict) -> bool:
     try:
         if len(positions) >= 3:
             print("Максимум позиций (3)")
             return False
 
-        mint = data.get("mint", "")
         name = data.get("name", "Unknown")
-
-        # Проверка начальной покупки создателя
         initial_buy_sol = data.get("solAmount", 0) or 0
+
         if initial_buy_sol < MIN_INITIAL_BUY_SOL:
             print(f"Слабый старт: {initial_buy_sol:.3f} SOL | {name}")
             return False
@@ -25,20 +64,17 @@ def is_good_token(data: dict, positions: dict) -> bool:
             print(f"Подозрительный старт: {initial_buy_sol:.1f} SOL | {name}")
             return False
 
-        # Проверка MCap
         market_cap_sol = data.get("marketCapSol", 0) or 0
         market_cap_usd = market_cap_sol * sol_price_usd
         if market_cap_usd < MIN_MCAP_USD or market_cap_usd > MAX_MCAP_USD:
             print(f"MCap не подходит: ${market_cap_usd:.0f} | {name}")
             return False
 
-        # Проверка что не honeypot — токен должен быть на pump pool
         pool = data.get("pool", "")
         if pool and pool != "pump":
             print(f"Не pump pool: {pool} | {name}")
             return False
 
-        print(f"ПОДХОДИТ: {name} | MCap: ${market_cap_usd:.0f} | Старт: {initial_buy_sol:.2f} SOL")
         return True
 
     except Exception as e:
