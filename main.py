@@ -9,6 +9,7 @@ from solders.keypair import Keypair
 from monitor import monitor_new_tokens
 from buyer import buy, sell
 from telegram_bot import bot_state, poll_updates, send_message
+from copy_trading import monitor_copy_trading, add_wallet, remove_wallet
 
 load_dotenv()
 
@@ -50,12 +51,11 @@ async def tg(text: str):
     await send_message(text)
 
 async def buy_token(mint: str, data: dict):
-    # Проверяем авто-стоп
     if not bot_state["running"]:
         print("Бот остановлен — пропускаем покупку")
         return
     if bot_state["daily_loss"] >= bot_state["max_daily_loss"]:
-        print(f"Достигнут лимит потерь {bot_state['max_daily_loss']} SOL — бот остановлен")
+        print(f"Достигнут лимит потерь — бот остановлен")
         bot_state["running"] = False
         await tg(f"🛑 Авто-стоп! Потери достигли {bot_state['max_daily_loss']} SOL за день")
         return
@@ -85,7 +85,6 @@ async def sell_token(mint: str, reason: str, current_mcap_sol: float):
         save_history_fn=save_history,
         tg_fn=tg
     )
-    # Обновляем дневные потери и PnL
     if result and trade_history:
         last = trade_history[-1]
         bot_state["total_pnl"] += last["pnl_sol"]
@@ -165,6 +164,25 @@ async def daily_reset():
         trade_history.clear()
         await save_history(trade_history)
 
+async def process_extra_commands(text: str):
+    if text.startswith("/addwallet "):
+        wallet = text.split()[1]
+        add_wallet(wallet)
+        await tg(f"✅ Кошелёк добавлен для copy trading: {wallet[:8]}...")
+    elif text.startswith("/removewallet "):
+        wallet = text.split()[1]
+        remove_wallet(wallet)
+        await tg(f"✅ Кошелёк удалён: {wallet[:8]}...")
+    elif text == "/wallets":
+        from copy_trading import TOP_WALLETS
+        if not TOP_WALLETS:
+            await tg("📭 Нет кошельков для copy trading")
+        else:
+            msg = "👛 Кошельки для copy trading:\n"
+            for w in list(TOP_WALLETS)[:10]:
+                msg += f"• {w[:8]}...\n"
+            await tg(msg)
+
 async def main():
     await init_redis()
     BUY_AMOUNT = float(os.getenv("BUY_AMOUNT", 0.01))
@@ -179,6 +197,7 @@ async def main():
     await tg(f"🚀 Pumpfun бот запущен!\nBUY={BUY_AMOUNT} SOL | TP={TAKE_PROFIT*100:.0f}% | SL={STOP_LOSS*100:.0f}%\n\nКоманды: /menu")
     await asyncio.gather(
         monitor_new_tokens(buy_token, positions),
+        monitor_copy_trading(buy_token, positions),
         monitor_positions(),
         daily_reset(),
         poll_updates(positions, trade_history)
