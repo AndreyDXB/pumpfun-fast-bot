@@ -5,12 +5,13 @@ from filters import is_good_token_basic
 
 watching = {}
 
-WATCH_SECONDS = 60
-MIN_WALLETS = 5
-MIN_VOLUME_SOL = 0.3
+WATCH_SECONDS = 90
+MIN_WALLETS = 10
+MIN_VOLUME_SOL = 1.0
 MAX_PRICE_DROP = 0.20
-MAX_SINGLE_HOLDER_PERCENT = 40.0  # в конце наблюдения
-INSTANT_WHALE_PERCENT = 80.0      # мгновенная блокировка только явных китов
+MIN_PRICE_GROWTH = 0.10        # цена должна вырасти минимум на 10%
+MAX_SINGLE_HOLDER_PERCENT = 35.0
+INSTANT_WHALE_PERCENT = 70.0
 
 PUMP_WS = "wss://pumpportal.fun/api/data"
 
@@ -75,8 +76,12 @@ async def watch_token(mint: str, initial_data: dict, callback, positions: dict):
                     print(f"Цена упала ({price_change*100:.1f}%) — пропускаем {name}")
                     watching.pop(mint, None)
                     return
+                if price_change < MIN_PRICE_GROWTH:
+                    print(f"Нет роста ({price_change*100:.1f}%) — пропускаем {name}")
+                    watching.pop(mint, None)
+                    return
 
-                # Проверка концентрации в конце наблюдения
+                # Проверка концентрации
                 if volume > 0:
                     for wallet, vol in wallet_volumes.items():
                         percent = (vol / volume) * 100
@@ -117,7 +122,6 @@ async def watch_token(mint: str, initial_data: dict, callback, positions: dict):
                             watching[mint]["wallet_volumes"][trader] = 0
                         watching[mint]["wallet_volumes"][trader] += sol_amount
 
-                        # Мгновенно блокируем только явных китов >80%
                         total = watching[mint]["volume_sol"]
                         if total > 0.5:
                             trader_vol = watching[mint]["wallet_volumes"][trader]
