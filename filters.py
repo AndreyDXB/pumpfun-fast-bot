@@ -39,8 +39,8 @@ async def check_anti_rug(mint: str) -> tuple[bool, str]:
 
 def is_good_token_basic(data: dict, positions: dict) -> bool:
     try:
-        if len(positions) >= 3:
-            print("Максимум позиций (3)")
+        if len(positions) >= 5:
+            print("Максимум позиций (5)")
             return False
         name = data.get("name", "Unknown")
         initial_buy_sol = data.get("solAmount", 0) or 0
