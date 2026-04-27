@@ -5,4 +5,3 @@ websockets==15.0.1
 python-dotenv==1.2.2
 base58==2.1.1
 redis==5.0.1
-telethon==1.36.0
