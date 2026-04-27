@@ -1,233 +1,96 @@
+# telegram_monitor.py
+from telethon import TelegramClient, events
 import asyncio
+import re
 import httpx
-import os
 
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+API_ID = 38522841
+API_HASH = "c8758751e087a5d736d71501cd82af26"
 
-bot_state = {
-    "running": True,
-    "take_profit": 0.50,
-    "stop_loss": 0.25,
-    "buy_amount": 0.01,
-    "daily_loss": 0.0,
-    "max_daily_loss": 0.05,
-    "total_pnl": 0.0,
-}
+# Реальные каналы с pump.fun calls
+CHANNELS = [
+    "bestcallsolana",      # Best Calls Solana
+    "pumpfunalerts",       # Pump.fun alerts
+    "solanagems",          # Solana gems
+    "farmercistjournal",   # 47k подписчиков, ранние дропы
+    "basedkookcalls",      # 18k подписчиков, ранние тренды
+    "dextoolssolanapumps", # DEXTools Solana pumps
+    "solana_calls",        # Solana calls
+    "pumpfun_gems",        # Pump.fun gems
+]
 
-async def send_message(text: str):
-    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
-        return
-    try:
-        async with httpx.AsyncClient() as client:
-            await client.post(
-                f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-                json={"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "HTML"},
-                timeout=5
-            )
-    except Exception as e:
-        print(f"Telegram ошибка: {e}")
+# Паттерн адреса Solana
+SOLANA_ADDRESS_PATTERN = r'[1-9A-HJ-NP-Za-km-z]{32,44}'
 
-async def send_keyboard(text: str, buttons: list):
-    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
-        return
-    keyboard = {"inline_keyboard": [[{"text": b["text"], "callback_data": b["data"]} for b in row] for row in buttons]}
-    try:
-        async with httpx.AsyncClient() as client:
-            await client.post(
-                f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-                json={
-                    "chat_id": TELEGRAM_CHAT_ID,
-                    "text": text,
-                    "reply_markup": keyboard,
-                    "parse_mode": "HTML"
-                },
-                timeout=5
-            )
-    except Exception as e:
-        print(f"Telegram keyboard ошибка: {e}")
+# Ключевые слова для фильтрации
+BUY_KEYWORDS = [
+    "pump.fun", "pumpfun", "CA:", "contract:", 
+    "🚀", "gem", "buy", "launch", "new token",
+    "solana", "SOL", "mint:"
+]
 
-async def process_command(text: str, positions: dict, trade_history: list):
-    text = text.strip().lower()
-
-    if text == "/start" or text == "/menu" or text == "menu":
-        await send_keyboard(
-            "🤖 <b>Pumpfun Bot</b>\nВыбери действие:",
-            [
-                [{"text": "📊 Статус", "data": "status"}, {"text": "⏸ Стоп", "data": "stop"}],
-                [{"text": "▶️ Старт", "data": "start"}, {"text": "💰 Позиции", "data": "positions"}],
-                [{"text": "📈 История", "data": "history"}, {"text": "⚙️ Настройки", "data": "settings"}],
-                [{"text": "👛 Кошельки", "data": "wallets"}, {"text": "❓ Помощь", "data": "help"}],
-            ]
-        )
-
-    elif text == "/status" or text == "status":
-        status = "✅ Работает" if bot_state["running"] else "⏸ Остановлен"
-        msg = (
-            f"🤖 <b>Статус бота</b>\n"
-            f"Состояние: {status}\n"
-            f"Позиций: {len(positions)}/3\n"
-            f"TP: {bot_state['take_profit']*100:.0f}% | SL: {bot_state['stop_loss']*100:.0f}%\n"
-            f"Размер: {bot_state['buy_amount']} SOL\n"
-            f"PnL сегодня: {bot_state['total_pnl']:+.4f} SOL\n"
-            f"Макс. потеря/день: {bot_state['max_daily_loss']} SOL"
-        )
-        await send_message(msg)
-
-    elif text == "/stop" or text == "stop":
-        bot_state["running"] = False
-        await send_message("⏸ Бот остановлен — новые покупки заблокированы")
-
-    elif text == "/start_bot" or text == "start":
-        bot_state["running"] = True
-        await send_message("▶️ Бот запущен — ищем монеты")
-
-    elif text == "/positions" or text == "positions":
-        if not positions:
-            await send_message("📭 Открытых позиций нет")
-            return
-        msg = "💰 <b>Открытые позиции:</b>\n"
-        for mint, pos in positions.items():
-            msg += f"• {pos['name']} | вход: ${pos['entry_mcap_usd']:.0f}\n"
-        await send_message(msg)
-
-    elif text == "/history" or text == "history":
-        if not trade_history:
-            await send_message("📭 История пуста")
-            return
-        wins = [t for t in trade_history if t["change"] > 0]
-        losses = [t for t in trade_history if t["change"] <= 0]
-        total_pnl = sum(t["pnl_sol"] for t in trade_history)
-        winrate = len(wins) / len(trade_history) * 100 if trade_history else 0
-        msg = (
-            f"📈 <b>История сделок</b>\n"
-            f"Всего: {len(trade_history)}\n"
-            f"Прибыльных: {len(wins)} | Убыточных: {len(losses)}\n"
-            f"Winrate: {winrate:.0f}%\n"
-            f"PnL: {total_pnl:+.4f} SOL"
-        )
-        await send_message(msg)
-
-    elif text.startswith("/tp "):
-        try:
-            val = float(text.split()[1])
-            bot_state["take_profit"] = val / 100
-            await send_message(f"✅ Take Profit установлен: {val:.0f}%")
-        except:
-            await send_message("❌ Формат: /tp 50")
-
-    elif text.startswith("/sl "):
-        try:
-            val = float(text.split()[1])
-            bot_state["stop_loss"] = val / 100
-            await send_message(f"✅ Stop Loss установлен: {val:.0f}%")
-        except:
-            await send_message("❌ Формат: /sl 25")
-
-    elif text.startswith("/amount "):
-        try:
-            val = float(text.split()[1])
-            bot_state["buy_amount"] = val
-            await send_message(f"✅ Размер сделки: {val} SOL")
-        except:
-            await send_message("❌ Формат: /amount 0.01")
-
-    elif text.startswith("/maxloss "):
-        try:
-            val = float(text.split()[1])
-            bot_state["max_daily_loss"] = val
-            await send_message(f"✅ Макс. потеря в день: {val} SOL")
-        except:
-            await send_message("❌ Формат: /maxloss 0.05")
-
-    elif text == "/settings" or text == "settings":
-        msg = (
-            f"⚙️ <b>Настройки</b>\n"
-            f"TP: {bot_state['take_profit']*100:.0f}% — изменить: /tp 50\n"
-            f"SL: {bot_state['stop_loss']*100:.0f}% — изменить: /sl 25\n"
-            f"Размер: {bot_state['buy_amount']} SOL — изменить: /amount 0.01\n"
-            f"Макс. потеря: {bot_state['max_daily_loss']} SOL — изменить: /maxloss 0.05"
-        )
-        await send_message(msg)
-
-    elif text.startswith("/addwallet "):
-        try:
-            from copy_trading import add_wallet
-            wallet = text.split()[1]
-            add_wallet(wallet)
-            await send_message(f"✅ Кошелёк добавлен: {wallet[:8]}...")
-        except:
-            await send_message("❌ Формат: /addwallet <адрес>")
-
-    elif text.startswith("/removewallet "):
-        try:
-            from copy_trading import remove_wallet
-            wallet = text.split()[1]
-            remove_wallet(wallet)
-            await send_message(f"✅ Кошелёк удалён: {wallet[:8]}...")
-        except:
-            await send_message("❌ Формат: /removewallet <адрес>")
-
-    elif text == "/wallets" or text == "wallets":
-        from copy_trading import TOP_WALLETS
-        if not TOP_WALLETS:
-            await send_message("📭 Нет кошельков для copy trading")
-        else:
-            msg = "👛 <b>Кошельки для copy trading:</b>\n"
-            for w in list(TOP_WALLETS)[:10]:
-                msg += f"• {w[:8]}...\n"
-            await send_message(msg)
-
-    elif text == "/help" or text == "help":
-        msg = (
-            "📋 <b>Команды:</b>\n"
-            "/menu — главное меню\n"
-            "/status — статус бота\n"
-            "/stop — остановить покупки\n"
-            "/start_bot — запустить покупки\n"
-            "/positions — открытые позиции\n"
-            "/history — история сделок\n"
-            "/tp 50 — Take Profit %\n"
-            "/sl 25 — Stop Loss %\n"
-            "/amount 0.01 — размер сделки SOL\n"
-            "/maxloss 0.05 — макс. потеря в день\n"
-            "/addwallet <адрес> — добавить кошелёк copy trading\n"
-            "/removewallet <адрес> — удалить кошелёк\n"
-            "/wallets — список кошельков"
-        )
-        await send_message(msg)
-
-async def poll_updates(positions: dict, trade_history: list):
-    offset = 0
-    print("Telegram бот запущен, ждём команды...")
+async def check_elon_twitter(buy_callback, positions):
+    """Мониторим X канал Маска через Telegram бот"""
     while True:
         try:
             async with httpx.AsyncClient() as client:
+                # Проверяем последние твиты через nitter
                 r = await client.get(
-                    f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates",
-                    params={"offset": offset, "timeout": 10},
-                    timeout=15
+                    "https://nitter.net/elonmusk/rss",
+                    timeout=10
                 )
-                data = r.json()
-                for update in data.get("result", []):
-                    offset = update["update_id"] + 1
-
-                    if "message" in update:
-                        text = update["message"].get("text", "")
-                        chat_id = str(update["message"]["chat"]["id"])
-                        if chat_id == str(TELEGRAM_CHAT_ID):
-                            await process_command(text, positions, trade_history)
-
-                    elif "callback_query" in update:
-                        data_cb = update["callback_query"]["data"]
-                        chat_id = str(update["callback_query"]["message"]["chat"]["id"])
-                        if chat_id == str(TELEGRAM_CHAT_ID):
-                            await process_command(data_cb, positions, trade_history)
-                            await client.post(
-                                f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/answerCallbackQuery",
-                                json={"callback_query_id": update["callback_query"]["id"]},
-                                timeout=5
-                            )
+                text = r.text
+                addresses = re.findall(SOLANA_ADDRESS_PATTERN, text)
+                for address in addresses:
+                    if len(address) >= 32 and address not in positions:
+                        print(f"🎯 ELON MUSK упомянул адрес: {address}")
+                        data = {
+                            "mint": address,
+                            "name": f"ELON_CALL_{address[:8]}",
+                            "solAmount": 1.0,
+                            "marketCapSol": 100,
+                            "traderPublicKey": "",
+                            "pool": "pump"
+                        }
+                        await buy_callback(address, data)
         except Exception as e:
-            print(f"Poll ошибка: {e}")
-            await asyncio.sleep(3)
+            print(f"Ошибка мониторинга Elon: {e}")
+        await asyncio.sleep(30)  # проверяем каждые 30 секунд
+
+async def start_telegram_monitor(buy_callback, positions):
+    client = TelegramClient("pump_monitor", API_ID, API_HASH)
+    await client.start()
+    print(f"Telegram мониторинг запущен | Каналов: {len(CHANNELS)}")
+
+    @client.on(events.NewMessage(chats=CHANNELS))
+    async def handler(event):
+        text = event.message.text or ""
+        
+        # Проверяем наличие ключевых слов
+        has_keyword = any(kw.lower() in text.lower() for kw in BUY_KEYWORDS)
+        if not has_keyword:
+            return
+
+        # Ищем адрес монеты
+        addresses = re.findall(SOLANA_ADDRESS_PATTERN, text)
+        
+        for address in addresses:
+            if len(address) >= 32 and address not in positions:
+                channel = event.chat.username or "unknown"
+                print(f"🎯 [{channel}] Найден адрес: {address}")
+                print(f"Сообщение: {text[:150]}")
+                
+                data = {
+                    "mint": address,
+                    "name": f"TG_{channel[:8]}_{address[:6]}",
+                    "solAmount": 1.0,
+                    "marketCapSol": 100,
+                    "traderPublicKey": "",
+                    "pool": "pump"
+                }
+                await buy_callback(address, data)
+
+    # Запускаем мониторинг Маска параллельно
+    asyncio.ensure_future(check_elon_twitter(buy_callback, positions))
+    
+    await client.run_until_disconnected()
