@@ -1,141 +1,66 @@
-import asyncio
-import json
-import websockets
-from filters import is_good_token_basic
+import httpx
 
-watching = {}
+MIN_INITIAL_BUY_SOL = 0.5
+MAX_INITIAL_BUY_SOL = 20.0
+MIN_MCAP_USD = 0          # убираем MCap фильтр
+MAX_MCAP_USD = 50000
+MAX_CREATOR_PERCENT = 20.0
+TOTAL_SUPPLY = 1_000_000_000
+sol_price_usd = 86.0
 
-WATCH_SECONDS = 90
-MIN_WALLETS = 10
-MIN_VOLUME_SOL = 1.0
-MAX_PRICE_DROP = 0.20
-MIN_PRICE_GROWTH = 0.10
-MAX_SINGLE_HOLDER_PERCENT = 35.0
-INSTANT_WHALE_PERCENT = 70.0
-
-PUMP_WS = "wss://pumpportal.fun/api/data"
-
-async def watch_token(mint: str, initial_data: dict, callback, positions: dict):
-    if not is_good_token_basic(initial_data, positions):
-        return
-
-    start_price = initial_data.get("marketCapSol", 0)
-    name = initial_data.get("name", mint[:8])
-    creator = initial_data.get("traderPublicKey", "")
-
-    watching[mint] = {
-        "name": name,
-        "start_price": start_price,
-        "wallets": set(),
-        "volume_sol": 0,
-        "wallet_volumes": {},
-        "current_price": start_price,
-        "creator": creator,
-        "creator_sold": False,
-    }
-
-    print(f"Наблюдаем: {name} | MCap: {start_price:.2f} SOL")
-
+async def check_anti_rug(mint: str) -> tuple[bool, str]:
     try:
-        async with websockets.connect(PUMP_WS, ping_interval=10, ping_timeout=5) as ws:
-            await ws.send(json.dumps({
-                "method": "subscribeTokenTrade",
-                "keys": [mint]
-            }))
+        async with httpx.AsyncClient() as client:
+            r = await client.get(
+                f"https://api.rugcheck.xyz/v1/tokens/{mint}/report/summary",
+                timeout=5
+            )
+            if r.status_code != 200:
+                return True, "API недоступен — пропускаем проверку"
+            data = r.json()
+            risks = data.get("risks", [])
+            for risk in risks:
+                risk_name = risk.get("name", "")
+                level = risk.get("level", "")
+                if level == "danger":
+                    return False, f"Danger risk: {risk_name}"
+                if "freeze" in risk_name.lower():
+                    return False, "Токен можно заморозить"
+                if "mint" in risk_name.lower() and level in ["warn", "danger"]:
+                    return False, "Mint authority не отозван"
+                if "top holders" in risk_name.lower() and level == "danger":
+                    return False, "Концентрация у топ холдеров"
+            score = data.get("score", 0)
+            if score < 500:
+                return False, f"Низкий rug score: {score}"
+            return True, f"OK (score: {score})"
+    except Exception as e:
+        return True, f"Ошибка проверки: {e}"
 
-            async def check_timeout():
-                await asyncio.sleep(WATCH_SECONDS)
-                data = watching.get(mint)
-                if not data:
-                    return
 
-                wallets = len(data["wallets"])
-                volume = data["volume_sol"]
-                current = data["current_price"]
-                start = data["start_price"]
-                name = data["name"]
-                wallet_volumes = data["wallet_volumes"]
+def is_good_token_basic(data: dict, positions: dict) -> bool:
+    try:
+        if len(positions) >= 3:
+            print("Максимум позиций (3)")
+            return False
 
-                price_change = ((current - start) / start) if start > 0 else 0
+        name = data.get("name", "Unknown")
 
-                print(f"Итог {name}: кошельков={wallets} | объём={volume:.3f} SOL | цена={price_change*100:.1f}%")
+        initial_buy_sol = data.get("solAmount", 0) or 0
+        if initial_buy_sol < MIN_INITIAL_BUY_SOL:
+            print(f"Слабый старт: {initial_buy_sol:.3f} SOL | {name}")
+            return False
+        if initial_buy_sol > MAX_INITIAL_BUY_SOL:
+            print(f"Подозрительный старт: {initial_buy_sol:.1f} SOL | {name}")
+            return False
 
-                if data["creator_sold"]:
-                    print(f"Создатель продал — пропускаем {name}")
-                    watching.pop(mint, None)
-                    return
-                if wallets < MIN_WALLETS:
-                    print(f"Мало кошельков ({wallets}) — пропускаем {name}")
-                    watching.pop(mint, None)
-                    return
-                if volume < MIN_VOLUME_SOL:
-                    print(f"Мало объёма ({volume:.3f} SOL) — пропускаем {name}")
-                    watching.pop(mint, None)
-                    return
-                if price_change < -MAX_PRICE_DROP:
-                    print(f"Цена упала ({price_change*100:.1f}%) — пропускаем {name}")
-                    watching.pop(mint, None)
-                    return
-                if price_change < MIN_PRICE_GROWTH:
-                    print(f"Нет роста ({price_change*100:.1f}%) — пропускаем {name}")
-                    watching.pop(mint, None)
-                    return
+        pool = data.get("pool", "")
+        if pool and pool != "pump":
+            print(f"Не pump pool: {pool} | {name}")
+            return False
 
-                if volume > 0:
-                    for wallet, vol in wallet_volumes.items():
-                        percent = (vol / volume) * 100
-                        if percent > MAX_SINGLE_HOLDER_PERCENT:
-                            print(f"Концентрация! {wallet[:8]}... держит {percent:.1f}% — пропускаем {name}")
-                            watching.pop(mint, None)
-                            return
-
-                print(f"ПОДХОДИТ: {name} | кошельков={wallets} | объём={volume:.3f} SOL | цена={price_change*100:.1f}%")
-                watching.pop(mint, None)
-                await callback(mint, {**initial_data, "marketCapSol": current})
-
-            asyncio.ensure_future(check_timeout())
-
-            async for msg in ws:
-                try:
-                    data = json.loads(msg)
-                    if data.get("mint") != mint:
-                        continue
-                    if mint not in watching:
-                        break
-
-                    trader = data.get("traderPublicKey", "")
-                    sol_amount = data.get("solAmount", 0) or 0
-                    current_mcap = data.get("marketCapSol", 0) or 0
-                    tx_type = data.get("txType", "")
-
-                    if trader == watching[mint]["creator"] and tx_type == "sell":
-                        watching[mint]["creator_sold"] = True
-                        print(f"Создатель продаёт! Пропускаем {watching[mint]['name']}")
-                        watching.pop(mint, None)
-                        break
-
-                    if tx_type == "buy":
-                        watching[mint]["wallets"].add(trader)
-                        watching[mint]["volume_sol"] += sol_amount
-                        if trader not in watching[mint]["wallet_volumes"]:
-                            watching[mint]["wallet_volumes"][trader] = 0
-                        watching[mint]["wallet_volumes"][trader] += sol_amount
-
-                        total = watching[mint]["volume_sol"]
-                        if total > 0.5:
-                            trader_vol = watching[mint]["wallet_volumes"][trader]
-                            percent = (trader_vol / total) * 100
-                            if percent > INSTANT_WHALE_PERCENT:
-                                print(f"Явный кит! {trader[:8]}... купил {percent:.1f}% — пропускаем {watching[mint]['name']}")
-                                watching.pop(mint, None)
-                                break
-
-                    if current_mcap > 0:
-                        watching[mint]["current_price"] = current_mcap
-
-                except Exception as e:
-                    print(f"Ошибка наблюдения: {e}")
+        return True
 
     except Exception as e:
-        print(f"WS наблюдения ошибка: {e}")
-        watching.pop(mint, None)
+        print(f"Ошибка фильтра: {e}")
+        return False
