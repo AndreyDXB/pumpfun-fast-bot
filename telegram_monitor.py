@@ -2,12 +2,11 @@ import asyncio
 import re
 import httpx
 
-SOLANA_ADDRESS_PATTERN = r'[1-9A-HJ-NP-Za-km-z]{32,44}'
+SOLANA_ADDRESS_PATTERN = r'[1-9A-HJ-NP-Za-km-z]{44}'  # только точно 44 символа
 
-# Публичные каналы — читаем через web.telegram.org
 CHANNELS = [
     "bestcallsolana",
-    "solanagems", 
+    "solanagems",
     "solana_calls",
     "pumpfun_gems",
     "farmercistjournal",
@@ -39,7 +38,7 @@ async def check_elon_twitter(buy_callback, positions):
                 text = r.text
                 addresses = re.findall(SOLANA_ADDRESS_PATTERN, text)
                 for address in addresses:
-                    if len(address) >= 32 and address not in positions and address not in seen_addresses:
+                    if address not in positions and address not in seen_addresses:
                         seen_addresses.add(address)
                         print(f"🎯 ELON MUSK упомянул адрес: {address}")
                         data = {
@@ -61,8 +60,7 @@ async def monitor_channel(channel: str, buy_callback, positions):
             html = await fetch_channel(channel)
             addresses = re.findall(SOLANA_ADDRESS_PATTERN, html)
             for address in addresses:
-                if (len(address) >= 32 and 
-                    address not in positions and 
+                if (address not in positions and
                     address not in seen_addresses):
                     seen_addresses.add(address)
                     print(f"🎯 [{channel}] Новый адрес: {address}")
@@ -77,7 +75,7 @@ async def monitor_channel(channel: str, buy_callback, positions):
                     await buy_callback(address, data)
         except Exception as e:
             print(f"Ошибка канала {channel}: {e}")
-        await asyncio.sleep(15)  # проверяем каждые 15 секунд
+        await asyncio.sleep(15)
 
 async def start_telegram_monitor(buy_callback, positions):
     print(f"HTTP мониторинг каналов запущен | Каналов: {len(CHANNELS)}")
