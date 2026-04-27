@@ -106,14 +106,33 @@ async def monitor_positions():
                         current_mcap_sol = data.get("marketCapSol", 0) or 0
                         if current_mcap_sol == 0:
                             continue
+
                         entry_mcap_sol = positions[mint]["entry_mcap_sol"]
                         change = (current_mcap_sol - entry_mcap_sol) / entry_mcap_sol
                         name = positions[mint]["name"]
-                        print(f"{name}: {change*100:.1f}%")
-                        if change >= bot_state["take_profit"]:
-                            await sell_token(mint, f"TP +{change*100:.0f}%", current_mcap_sol)
-                        elif change <= -bot_state["stop_loss"]:
+
+                        # Трейлинг стоп — обновляем максимум
+                        if "max_change" not in positions[mint]:
+                            positions[mint]["max_change"] = 0.0
+                        if change > positions[mint]["max_change"]:
+                            positions[mint]["max_change"] = change
+
+                        max_change = positions[mint]["max_change"]
+                        trailing_drop = max_change - change
+
+                        print(f"{name}: {change*100:.1f}% | Макс: {max_change*100:.1f}% | Откат: {trailing_drop*100:.1f}%")
+
+                        # Стоп-лосс
+                        if change <= -bot_state["stop_loss"]:
                             await sell_token(mint, f"SL {change*100:.0f}%", current_mcap_sol)
+
+                        # Трейлинг стоп — продаём если упало 15% от максимума
+                        elif max_change >= 0.25 and trailing_drop >= 0.15:
+                            await sell_token(mint, f"TS +{change*100:.0f}% (макс +{max_change*100:.0f}%)", current_mcap_sol)
+
+                        # Обычный TP если рост небольшой
+                        elif change >= bot_state["take_profit"] and max_change < 0.50:
+                            await sell_token(mint, f"TP +{change*100:.0f}%", current_mcap_sol)
 
                         if set(positions.keys()) != set(mints):
                             print("Позиции изменились — переподключение")
@@ -132,7 +151,7 @@ async def monitor_positions():
 async def check_positions_timeout():
     while True:
         await asyncio.sleep(60)
-        timeout_minutes = float(os.getenv("TIMEOUT_MINUTES", 120))
+        timeout_minutes = float(os.getenv("TIMEOUT_MINUTES", 30))
         for mint in list(positions.keys()):
             try:
                 pos = positions[mint]
@@ -176,9 +195,9 @@ async def daily_reset():
 async def main():
     await init_redis()
     BUY_AMOUNT = float(os.getenv("BUY_AMOUNT", 0.01))
-    TAKE_PROFIT = float(os.getenv("TAKE_PROFIT", 0.50))
-    STOP_LOSS = float(os.getenv("STOP_LOSS", 0.25))
-    TIMEOUT_MINUTES = float(os.getenv("TIMEOUT_MINUTES", 120))
+    TAKE_PROFIT = float(os.getenv("TAKE_PROFIT", 0.25))
+    STOP_LOSS = float(os.getenv("STOP_LOSS", 0.15))
+    TIMEOUT_MINUTES = float(os.getenv("TIMEOUT_MINUTES", 30))
     bot_state["buy_amount"] = BUY_AMOUNT
     bot_state["take_profit"] = TAKE_PROFIT
     bot_state["stop_loss"] = STOP_LOSS
@@ -193,7 +212,7 @@ async def main():
         check_positions_timeout(),
         daily_reset(),
         poll_updates(positions, trade_history),
-        start_telegram_monitor(buy_token, positions),  # 👈 новый модуль
+        start_telegram_monitor(buy_token, positions),
     )
 
 if __name__ == "__main__":
