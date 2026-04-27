@@ -1,4 +1,4 @@
-import requests
+import httpx
 import os
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
@@ -15,7 +15,6 @@ bot_state = {
 }
 
 async def send_message(text: str):
-    import httpx
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     try:
         async with httpx.AsyncClient() as client:
@@ -28,7 +27,7 @@ async def send_message(text: str):
         print(f"Ошибка Telegram: {e}")
 
 async def poll_updates(positions, trade_history):
-    import httpx
+    import asyncio
     last_update_id = 0
     while True:
         try:
@@ -58,5 +57,4 @@ async def poll_updates(positions, trade_history):
                         )
         except Exception as e:
             print(f"Poll ошибка: {e}")
-        import asyncio
         await asyncio.sleep(2)
