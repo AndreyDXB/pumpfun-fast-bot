@@ -1,96 +1,62 @@
-# telegram_monitor.py
-from telethon import TelegramClient, events
-import asyncio
-import re
-import httpx
+import requests
+import os
 
-API_ID = 38522841
-API_HASH = "c8758751e087a5d736d71501cd82af26"
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-# Реальные каналы с pump.fun calls
-CHANNELS = [
-    "bestcallsolana",      # Best Calls Solana
-    "pumpfunalerts",       # Pump.fun alerts
-    "solanagems",          # Solana gems
-    "farmercistjournal",   # 47k подписчиков, ранние дропы
-    "basedkookcalls",      # 18k подписчиков, ранние тренды
-    "dextoolssolanapumps", # DEXTools Solana pumps
-    "solana_calls",        # Solana calls
-    "pumpfun_gems",        # Pump.fun gems
-]
+bot_state = {
+    "running": True,
+    "buy_amount": 0.01,
+    "take_profit": 0.25,
+    "stop_loss": 0.15,
+    "daily_loss": 0.0,
+    "max_daily_loss": 0.5,
+    "total_pnl": 0.0,
+}
 
-# Паттерн адреса Solana
-SOLANA_ADDRESS_PATTERN = r'[1-9A-HJ-NP-Za-km-z]{32,44}'
+async def send_message(text: str):
+    import httpx
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    try:
+        async with httpx.AsyncClient() as client:
+            await client.post(url, json={
+                "chat_id": TELEGRAM_CHAT_ID,
+                "text": text,
+                "parse_mode": "HTML"
+            }, timeout=15)
+    except Exception as e:
+        print(f"Ошибка Telegram: {e}")
 
-# Ключевые слова для фильтрации
-BUY_KEYWORDS = [
-    "pump.fun", "pumpfun", "CA:", "contract:", 
-    "🚀", "gem", "buy", "launch", "new token",
-    "solana", "SOL", "mint:"
-]
-
-async def check_elon_twitter(buy_callback, positions):
-    """Мониторим X канал Маска через Telegram бот"""
+async def poll_updates(positions, trade_history):
+    import httpx
+    last_update_id = 0
     while True:
         try:
+            url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates"
             async with httpx.AsyncClient() as client:
-                # Проверяем последние твиты через nitter
-                r = await client.get(
-                    "https://nitter.net/elonmusk/rss",
-                    timeout=10
-                )
-                text = r.text
-                addresses = re.findall(SOLANA_ADDRESS_PATTERN, text)
-                for address in addresses:
-                    if len(address) >= 32 and address not in positions:
-                        print(f"🎯 ELON MUSK упомянул адрес: {address}")
-                        data = {
-                            "mint": address,
-                            "name": f"ELON_CALL_{address[:8]}",
-                            "solAmount": 1.0,
-                            "marketCapSol": 100,
-                            "traderPublicKey": "",
-                            "pool": "pump"
-                        }
-                        await buy_callback(address, data)
+                r = await client.get(url, params={
+                    "offset": last_update_id + 1,
+                    "timeout": 10
+                }, timeout=15)
+                updates = r.json().get("result", [])
+                for update in updates:
+                    last_update_id = update["update_id"]
+                    msg = update.get("message", {})
+                    text = msg.get("text", "").strip().lower()
+                    if text == "/stop":
+                        bot_state["running"] = False
+                        await send_message("🛑 Бот остановлен")
+                    elif text == "/start":
+                        bot_state["running"] = True
+                        await send_message("✅ Бот запущен")
+                    elif text == "/status":
+                        status = "✅ Работает" if bot_state["running"] else "🛑 Остановлен"
+                        await send_message(
+                            f"Статус: {status}\n"
+                            f"Позиций: {len(positions)}\n"
+                            f"PnL: {bot_state['total_pnl']:+.4f} SOL"
+                        )
         except Exception as e:
-            print(f"Ошибка мониторинга Elon: {e}")
-        await asyncio.sleep(30)  # проверяем каждые 30 секунд
-
-async def start_telegram_monitor(buy_callback, positions):
-    client = TelegramClient("pump_monitor", API_ID, API_HASH)
-    await client.start()
-    print(f"Telegram мониторинг запущен | Каналов: {len(CHANNELS)}")
-
-    @client.on(events.NewMessage(chats=CHANNELS))
-    async def handler(event):
-        text = event.message.text or ""
-        
-        # Проверяем наличие ключевых слов
-        has_keyword = any(kw.lower() in text.lower() for kw in BUY_KEYWORDS)
-        if not has_keyword:
-            return
-
-        # Ищем адрес монеты
-        addresses = re.findall(SOLANA_ADDRESS_PATTERN, text)
-        
-        for address in addresses:
-            if len(address) >= 32 and address not in positions:
-                channel = event.chat.username or "unknown"
-                print(f"🎯 [{channel}] Найден адрес: {address}")
-                print(f"Сообщение: {text[:150]}")
-                
-                data = {
-                    "mint": address,
-                    "name": f"TG_{channel[:8]}_{address[:6]}",
-                    "solAmount": 1.0,
-                    "marketCapSol": 100,
-                    "traderPublicKey": "",
-                    "pool": "pump"
-                }
-                await buy_callback(address, data)
-
-    # Запускаем мониторинг Маска параллельно
-    asyncio.ensure_future(check_elon_twitter(buy_callback, positions))
-    
-    await client.run_until_disconnected()
+            print(f"Poll ошибка: {e}")
+        import asyncio
+        await asyncio.sleep(2)
