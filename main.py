@@ -10,6 +10,7 @@ from monitor import monitor_new_tokens
 from buyer import buy, sell
 from telegram_bot import bot_state, poll_updates, send_message
 from copy_trading import monitor_copy_trading, add_wallet, remove_wallet
+from telegram_monitor import start_telegram_monitor
 
 load_dotenv()
 
@@ -129,7 +130,6 @@ async def monitor_positions():
             await asyncio.sleep(2)
 
 async def check_positions_timeout():
-    """Принудительно продаём позиции которые висят дольше TIMEOUT_MINUTES"""
     while True:
         await asyncio.sleep(60)
         timeout_minutes = float(os.getenv("TIMEOUT_MINUTES", 120))
@@ -192,7 +192,8 @@ async def main():
         monitor_positions(),
         check_positions_timeout(),
         daily_reset(),
-        poll_updates(positions, trade_history)
+        poll_updates(positions, trade_history),
+        start_telegram_monitor(buy_token, positions),  # 👈 новый модуль
     )
 
 if __name__ == "__main__":
